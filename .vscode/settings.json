@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "./Src/L2CS-Net/l2cs"
+    ]
+}

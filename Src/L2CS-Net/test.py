@@ -56,7 +56,7 @@ def parse_args():
     return args
 
 
-def getArch(arch,bins):
+def getArch(arch, bins):
     # Base network structure
     if arch == 'ResNet18':
         model = L2CS( torchvision.models.resnet.BasicBlock,[2, 2,  2, 2], bins)
@@ -66,6 +66,9 @@ def getArch(arch,bins):
         model = L2CS( torchvision.models.resnet.Bottleneck,[3, 4, 23, 3], bins)
     elif arch == 'ResNet152':
         model = L2CS( torchvision.models.resnet.Bottleneck,[3, 8, 36, 3], bins)
+    elif arch == 'MobileNetV2':
+        from l2cs import L2CS_MobileNetV2
+        model = L2CS_MobileNetV2(bins)
     else:
         if arch != 'ResNet50':
             print('Invalid value for architecture is passed! '
@@ -280,5 +283,5 @@ if __name__ == '__main__':
             fig.savefig(os.path.join(evalpath, os.path.join("fold"+str(fold), data_set+".png")), format='png')
             # plt.show()
 
-            
-           
+
+

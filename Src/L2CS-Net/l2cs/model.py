@@ -70,4 +70,33 @@ class L2CS(nn.Module):
         return pre_yaw_gaze, pre_pitch_gaze
 
 
+class L2CS_MobileNetV2(nn.Module):
+    def __init__(self, num_bins):
+        super(L2CS_MobileNetV2, self).__init__()
+        
+        # Load pretrained MobileNetV2
+        mobilenet = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v2', pretrained=True)
+        
+        # Remove the classification head
+        self.features = mobilenet.features
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        # MobileNetV2 output features: 1280
+        self.fc_yaw_gaze = nn.Linear(1280, num_bins)
+        self.fc_pitch_gaze = nn.Linear(1280, num_bins)
+        
+        # Vestigial layer from previous experiments
+        self.fc_finetune = nn.Linear(1280 + 3, 3)
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        
+        # gaze
+        pre_yaw_gaze = self.fc_yaw_gaze(x)
+        pre_pitch_gaze = self.fc_pitch_gaze(x)
+        return pre_yaw_gaze, pre_pitch_gaze
+
+
 

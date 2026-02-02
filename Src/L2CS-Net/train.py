@@ -115,6 +115,10 @@ def getArch_weights(arch, bins):
     elif arch == 'ResNet152':
         model = L2CS(torchvision.models.resnet.Bottleneck,[3, 8, 36, 3], bins)
         pre_url = 'https://download.pytorch.org/models/resnet152-b121ed2d.pth'
+    elif arch == 'MobileNetV2':
+        from l2cs import L2CS_MobileNetV2
+        model = L2CS_MobileNetV2(bins)
+        pre_url = None  # MobileNetV2 loads pretrained internally
     else:
         if arch != 'ResNet50':
             print('Invalid value for architecture is passed! '
@@ -149,7 +153,8 @@ if __name__ == '__main__':
     if data_set=="gaze360":
         model, pre_url = getArch_weights(args.arch, 90)
         if args.snapshot == '':
-            load_filtered_state_dict(model, model_zoo.load_url(pre_url))
+            if pre_url is not None:
+                load_filtered_state_dict(model, model_zoo.load_url(pre_url))
         else:
             saved_state_dict = torch.load(args.snapshot)
             model.load_state_dict(saved_state_dict)
@@ -268,7 +273,8 @@ if __name__ == '__main__':
         testlabelpathombined = [os.path.join(args.gazeMpiilabel_dir, j) for j in folder]
         for fold in range(15):
             model, pre_url = getArch_weights(args.arch, 28)
-            load_filtered_state_dict(model, model_zoo.load_url(pre_url))
+            if pre_url is not None:
+                load_filtered_state_dict(model, model_zoo.load_url(pre_url))
             model = nn.DataParallel(model)
             model.to(gpu)
             print('Loading data.')
@@ -378,7 +384,7 @@ if __name__ == '__main__':
                                     output+'/fold' + str(fold) +'/'+
                                     '_epoch_' + str(epoch+1) + '.pkl')
                         )
-                    
-                    
 
-   
+
+
+
