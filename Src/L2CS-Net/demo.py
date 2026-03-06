@@ -111,7 +111,8 @@ def main():
         gaze_pipeline = Pipeline(
             weights=args.snapshot,
             arch=args.arch,
-            device=torch.device(args.device)
+            device=torch.device(args.device),
+            include_detector=False
         )
         print("Model loaded successfully!")
     except Exception as e:
@@ -120,7 +121,14 @@ def main():
     
     # Open camera
     print(f"Opening camera {args.cam}...")
-    cap = cv2.VideoCapture(args.cam)
+    # cap = cv2.VideoCapture(args.cam)
+    pipeline = (
+    	"libcamerasrc ! "
+    	"video/x-raw,width=640,height=480,framerate=15/1 ! "
+    	"videoconvert ! appsink drop=true"
+    )
+
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
     
     if not cap.isOpened():
         print(f"Error: Cannot open camera {args.cam}")
@@ -182,7 +190,7 @@ def main():
                 print(f"Error: {e}")
         
         # Display the frame
-        cv2.imshow('L2CS-Net Gaze Estimation', frame)
+        # cv2.imshow('L2CS-Net Gaze Estimation', frame)
         
         # Quit on 'q' key
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -196,3 +204,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# Run code with: python demo.py --snapshot models/L2CSNet_gaze360.pkl --device cpu --cam 0
