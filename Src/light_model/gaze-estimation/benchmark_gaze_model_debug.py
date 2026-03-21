@@ -4,7 +4,7 @@ import time
 import numpy as np
 import onnxruntime as ort
 
-DATASET_DIR = "data"
+DATASET_DIR = "data_test"
 LABELS = ["left", "right", "center", "up", "down"]
 
 # ═══════════════════════════════════════════════════════════════════
@@ -37,8 +37,8 @@ MODEL_CONFIGS = {
 }
 
 # ← Chọn model ở đây
-# MODEL_PATH = "weights/mobileone_s0_gaze.onnx"
-MODEL_PATH = "weights/mobilenetv2_gaze.onnx"
+MODEL_PATH = "weights/mobileone_s0_gaze.onnx"
+# MODEL_PATH = "weights/mobilenetv2_gaze.onnx"
 
 
 class GazeBenchmark:
