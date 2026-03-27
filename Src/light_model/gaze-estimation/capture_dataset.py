@@ -2,27 +2,38 @@ import os
 import time
 import subprocess
 from datetime import datetime
+from PIL import Image
 
-
-def capture_image(save_path):
-    """
-    Capture image using rpicam-still
-    """
+def capture_image(save_path, size=448):
+    raw_path = save_path.replace(".jpg", "_raw.jpg")
     cmd = [
         "rpicam-still",
-        "-n",                 # no preview
-        "-t", "1",            # almost instant capture
-        "-o", save_path
+        "-n",
+        "-t", "1",
+        "--width", "640",
+        "--height", "480",
+        "-o", raw_path
     ]
-
     try:
-        subprocess.run(cmd, check=True)
-        return True
+        subprocess.run(cmd, check=True, capture_output=True)
     except subprocess.CalledProcessError:
         return False
 
+    # Center crop 480x480
+    try:
+        img = Image.open(raw_path)
+        w, h = img.size          # 640 x 480
+        left = (w - size) // 2  # 80
+        top  = (h - size) // 2  # 0
+        img.crop((left, top, left + size, top + size)).save(save_path, quality=95)
+        os.remove(raw_path)
+        return True
+    except Exception as e:
+        print(f"Crop failed: {e}")
+        return False
 
-def collect_gaze_dataset(save_root="data", images_per_direction=50):
+
+def collect_gaze_dataset(save_root="my_captures", images_per_direction=50):
 
     directions = ["left", "right", "up", "down", "center"]
 
