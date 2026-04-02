@@ -24,10 +24,10 @@ LABELS = ["left", "right", "center", "up", "down"]
 MODEL_CONFIGS = {
     "weights/mobileone_s0_gaze.onnx": {
         "input_size": (448, 448),
-        "yaw_threshold": 12.0,
+        "yaw_threshold": 3.0,
         "pitch_threshold": 10.0,
         "pitch_up_sign": +1,   # pitch > 0 = up
-        "yaw_sign": -1
+        "yaw_sign": 1
     },
     "weights/mobilenetv2_gaze.onnx": {
         "input_size": (448, 448),
@@ -102,16 +102,15 @@ class GazeBenchmark:
         signed_pitch = pitch * self.pitch_up_sign
         signed_yaw   = yaw   * self.yaw_sign
 
-        if abs(signed_pitch) > abs(signed_yaw):
-            if signed_pitch > self.pitch_threshold:
-                return "up"
-            if signed_pitch < -self.pitch_threshold:
-                return "down"
-        else:
-            if signed_yaw > self.yaw_threshold:
-                return "right"
-            if signed_yaw < -self.yaw_threshold:
-                return "left"
+        if signed_yaw > self.yaw_threshold:
+            return "right"
+        elif signed_yaw < -self.yaw_threshold:
+            return "left"
+        elif signed_pitch > self.pitch_threshold:
+            return "up"
+        elif signed_pitch < -self.pitch_threshold:
+            return "down"    
+            
         
         return "center"
         
