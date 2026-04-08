@@ -123,7 +123,7 @@ def draw_gaze(frame, face_box, pitch, yaw, direction):
 
     # Mũi tên hướng nhìn
     yaw_rad, pitch_rad = np.radians(yaw), np.radians(pitch)
-    dx, dy = np.tan(yaw_rad), -np.tan(pitch_rad)
+    dx, dy = -np.tan(yaw_rad), -np.tan(pitch_rad)
     norm = np.hypot(dx, dy)
     if norm > 0:
         dx /= norm

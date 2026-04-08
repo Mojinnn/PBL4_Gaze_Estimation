@@ -1,15 +1,3 @@
-"""
-Gaze estimation real-time từ Pi Camera (không dùng picamera2)
-=============================================================
-Dùng rpicam-vid stream raw BGR qua stdout pipe → OpenCV đọc trực tiếp.
-Không cần ghi file tạm, không cần picamera2.
-
-Chạy:
-    python run_camera_gaze.py
-
-Nhấn  Ctrl+C  để dừng.
-"""
-
 import os
 import cv2
 import time
@@ -19,18 +7,16 @@ import numpy as np
 import onnxruntime as ort
 from collections import deque
 
-# ─── Paths ───────────────────────────────────────────────────────────────────
 OUTPUT_DIR = "results_video"
 MODEL_PATH = "weights/mobileone_s0_gaze.onnx"
 
-# ─── Params ──────────────────────────────────────────────────────────────────
 CAPTURE_W    = 640
 CAPTURE_H    = 480
-CAPTURE_FPS  = 30
+CAPTURE_FPS  = 1
 DETECT_EVERY = 10
 VOTE_WINDOW  = 8
 VOTE_THRESH  = 0.60
-SAVE_EVERY   = 1        # Lưu mỗi N frame (1 = lưu tất cả)
+SAVE_EVERY   = 1        
 
 MODEL_CONFIGS = {
     "weights/mobileone_s0_gaze.onnx": {
@@ -58,17 +44,11 @@ COLOR_MAP = {
 }
 
 
-# ─── Camera buffer dùng rpicam-vid pipe ──────────────────────────────────────
 class CameraBuffer:
-    """
-    Spawn rpicam-vid với codec yuv420, đọc raw bytes từ stdout.
-    Thread riêng đọc liên tục và giữ frame MỚI NHẤT.
-    """
 
     def __init__(self, width=640, height=480, fps=30):
         self.width  = width
         self.height = height
-        # Số byte 1 frame YUV420: W*H*3//2
         self._frame_bytes = width * height * 3 // 2
 
         cmd = [
@@ -93,7 +73,7 @@ class CameraBuffer:
         self._stop   = threading.Event()
         self._thread = threading.Thread(target=self._reader, daemon=True)
         self._thread.start()
-        time.sleep(1.0)   # Chờ camera khởi động
+        time.sleep(1.0)  
 
     def _reader(self):
         while not self._stop.is_set():
@@ -124,7 +104,6 @@ class CameraBuffer:
         self._thread.join(timeout=2)
 
 
-# ─── Gaze model ──────────────────────────────────────────────────────────────
 class GazeModel:
     def __init__(self, model_path):
         cfg = MODEL_CONFIGS[model_path]
@@ -134,60 +113,102 @@ class GazeModel:
         self.pitch_up_sign   = cfg["pitch_up_sign"]
         self.yaw_sign        = cfg.get("yaw_sign", 1)
 
+        # ? Optimize ONNX Runtime
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        opts.intra_op_num_threads = 4
-        self.session    = ort.InferenceSession(
-            model_path, opts, providers=["CPUExecutionProvider"]
+        opts.intra_op_num_threads = 2   # ? Pi t?i uu nh?t = 2
+
+        self.session = ort.InferenceSession(
+            model_path,
+            opts,
+            providers=["CPUExecutionProvider"]
         )
         self.input_name = self.session.get_inputs()[0].name
 
+        # ?? Debug 1 l?n d? bi?t output order
+        print("\n=== MODEL OUTPUT ===")
+        for i, o in enumerate(self.session.get_outputs()):
+            print(f"{i}: {o.name}, shape={o.shape}")
+        print("====================\n")
+
     def predict(self, img):
-        x    = cv2.resize(img, self.input_size)
-        x    = cv2.cvtColor(x, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        # ? Resize nh? l?i d? tang FPS
+        x = cv2.resize(img, (224, 224))
+
+        x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        x    = ((x - mean) / std).transpose(2, 0, 1)
-        x    = np.expand_dims(x, 0).astype(np.float32)
 
-        t0  = time.time()
-        out = self.session.run(None, {self.input_name: x})
-        t   = time.time() - t0
+        x = ((x - mean) / std).transpose(2, 0, 1)
+        x = np.expand_dims(x, 0).astype(np.float32)
 
-        def soft_exp(logits):
+        t0 = time.time()
+        outputs = self.session.run(None, {self.input_name: x})
+        infer_time = time.time() - t0
+
+        # ===== decode L2CS =====
+        def decode(logits):
+            logits = logits[0]
             e = np.exp(logits - np.max(logits))
-            p = e / e.sum()
+            p = e / np.sum(e)
             return np.sum(p * np.arange(len(p))) * 4 - 180
 
-        return soft_exp(out[1][0]), soft_exp(out[0][0]), t
+        out0 = decode(outputs[0])
+        out1 = decode(outputs[1])
+
+        # ?? Auto detect yaw/pitch (tr�nh sai model)
+        if abs(out0) > abs(out1):
+            yaw, pitch = out0, out1
+        else:
+            yaw, pitch = out1, out0
+
+        return pitch, yaw, infer_time
 
     def direction(self, pitch, yaw):
-        if   yaw   * self.yaw_sign      >  self.yaw_threshold:   return "right"
-        elif yaw   * self.yaw_sign      < -self.yaw_threshold:   return "left"
-        elif pitch * self.pitch_up_sign >  self.pitch_threshold:  return "up"
-        elif pitch * self.pitch_up_sign < -self.pitch_threshold:  return "down"
+        if yaw * self.yaw_sign > self.yaw_threshold:
+            return "right"
+        elif yaw * self.yaw_sign < -self.yaw_threshold:
+            return "left"
         return "center"
 
 
-# ─── Face detector + CSRT tracker ────────────────────────────────────────────
 class FaceDetector:
     CASCADE = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
+    _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     def __init__(self, detect_every=10):
-        self.detect_every = detect_every
-        self._tracker     = None
-        self._box         = None
-        self._frame_count = 0
-        self._tracking    = False
+        self.detect_every  = detect_every
+        self._tracker      = None
+        self._box          = None
+        self._frame_count  = 0
+        self._tracking     = False
+        self._miss_streak  = 0  
+
+    def _preprocess(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return self._CLAHE.apply(gray)
 
     def _detect(self, frame):
-        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.CASCADE.detectMultiScale(gray, 1.3, 5, minSize=(60, 60))
+        gray = self._preprocess(frame)
+
+        faces = self.CASCADE.detectMultiScale(
+            gray, scaleFactor=1.2, minNeighbors=4, minSize=(50, 50)
+        )
+
         if len(faces) == 0:
+            faces = self.CASCADE.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=2, minSize=(40, 40)
+            )
+
+        if len(faces) == 0:
+            self._miss_streak += 1
             return None
-        x, y, w, h = faces[0]
+
+        self._miss_streak = 0
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
         m  = int(0.2 * w)
         x1 = max(0, x - m)
         y1 = max(0, y - m)
@@ -203,10 +224,13 @@ class FaceDetector:
 
     def get(self, frame):
         self._frame_count += 1
+
+        effective_interval = max(3, self.detect_every - self._miss_streak * 2)
         need_detect = (
-            self._frame_count % self.detect_every == 1
+            self._frame_count % effective_interval == 1
             or not self._tracking
         )
+
         if need_detect:
             box = self._detect(frame)
             if box:
@@ -233,7 +257,6 @@ class FaceDetector:
         return frame[y1:y2, x1:x2], (x1, y1, x2, y2)
 
 
-# ─── Voting window ────────────────────────────────────────────────────────────
 class VotingWindow:
     LABELS = ["left", "right", "up", "down", "center"]
 
@@ -253,7 +276,6 @@ class VotingWindow:
         return best if counts[best] / self.window >= self.thresh else None
 
 
-# ─── Draw ─────────────────────────────────────────────────────────────────────
 def draw_gaze(frame, face_box, pitch, yaw, raw_dir, decision):
     x1, y1, x2, y2 = face_box
     cx  = (x1 + x2) // 2
@@ -264,7 +286,7 @@ def draw_gaze(frame, face_box, pitch, yaw, raw_dir, decision):
     cv2.rectangle(frame, (x1, y1), (x2, y2), col, 1)
 
     dx = np.tan(np.radians(yaw))
-    dy = np.tan(np.radians(pitch))
+    dy = -np.tan(np.radians(pitch))
     n  = np.hypot(dx, dy)
     if n > 0:
         dx /= n; dy /= n
@@ -286,7 +308,6 @@ def draw_gaze(frame, face_box, pitch, yaw, raw_dir, decision):
         cv2.putText(frame, msg, (bx, dh + 8), font, 1.0, (0, 255, 128), 3)
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
 def run():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     session_dir = os.path.join(OUTPUT_DIR, time.strftime("%Y%m%d_%H%M%S"))
@@ -301,7 +322,7 @@ def run():
     print(f"Output : {session_dir}/")
     print(f"Config : detect_every={DETECT_EVERY}  vote_window={VOTE_WINDOW}"
           f"  vote_thresh={VOTE_THRESH}")
-    print("Nhấn  Ctrl+C  để dừng\n")
+    print("Ctrl + C stop")
 
     idx           = 0
     saved         = 0
@@ -338,10 +359,14 @@ def run():
             now        = time.time()
             fps_smooth = 0.85 * fps_smooth + 0.15 / max(now - t_prev, 1e-6)
             t_prev     = now
-            mode       = "DET" if idx % DETECT_EVERY == 1 else "TRK"
+            mode       = "DET" if detector._tracking == False or idx % DETECT_EVERY == 1 else "TRK"
+            miss       = detector._miss_streak
+            hud        = f"{mode}  {fps_smooth:.1f}fps  {infer_t*1000:.0f}ms"
+            if miss > 0:
+                hud += f"  miss:{miss}"
             cv2.putText(vis,
-                        f"{mode}  {fps_smooth:.1f}fps  {infer_t*1000:.0f}ms",
-                        (CAPTURE_W - 175, 20),
+                        hud,
+                        (CAPTURE_W - 210, 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
 
             if idx % SAVE_EVERY == 0:
@@ -356,7 +381,7 @@ def run():
         pass
 
     cam.release()
-    print(f"\nDone. Saved {saved} frames → {session_dir}/")
+    print(f"\nDone. Saved {saved} frames to {session_dir}/")
 
 
 if __name__ == "__main__":
