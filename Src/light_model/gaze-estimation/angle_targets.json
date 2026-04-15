@@ -1,0 +1,37 @@
+{
+  "left": {
+    "yaw": -8.83,
+    "pitch": 7.59,
+    "yaw_std": 6.47,
+    "pitch_std": 11.36,
+    "n": 69
+  },
+  "right": {
+    "yaw": 16.46,
+    "pitch": 4.79,
+    "yaw_std": 5.61,
+    "pitch_std": 11.15,
+    "n": 70
+  },
+  "up": {
+    "yaw": 7.01,
+    "pitch": 22.54,
+    "yaw_std": 7.71,
+    "pitch_std": 7.65,
+    "n": 64
+  },
+  "down": {
+    "yaw": 10.76,
+    "pitch": -18.61,
+    "yaw_std": 10.55,
+    "pitch_std": 7.09,
+    "n": 67
+  },
+  "center": {
+    "yaw": 9.67,
+    "pitch": 2.57,
+    "yaw_std": 6.07,
+    "pitch_std": 6.72,
+    "n": 68
+  }
+}
