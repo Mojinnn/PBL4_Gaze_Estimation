@@ -33,7 +33,7 @@ def capture_image(save_path, size=448):
         return False
 
 
-def collect_gaze_dataset(save_root="my_captures", images_per_direction=50):
+def collect_gaze_dataset(save_root="my_captures_tra", images_per_direction=20):
 
     directions = ["left", "right", "up", "down", "center"]
 
@@ -74,4 +74,4 @@ def collect_gaze_dataset(save_root="my_captures", images_per_direction=50):
 
 
 if __name__ == "__main__":
-    collect_gaze_dataset(images_per_direction=50)
+    collect_gaze_dataset(images_per_direction=20)
