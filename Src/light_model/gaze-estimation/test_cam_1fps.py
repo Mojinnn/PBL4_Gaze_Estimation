@@ -16,7 +16,7 @@ import numpy as np
 import onnxruntime as ort
 
 OUTPUT_DIR = "results_video"
-MODEL_PATH = "weights/mobileone_s0_gaze.onnx"
+MODEL_PATH = "weights/gaze_ft_mobileone.onnx"
 
 CAPTURE_W   = 640
 CAPTURE_H   = 480
@@ -30,9 +30,14 @@ MODEL_CONFIGS = {
         "pitch_up_sign": +1,
         "yaw_sign":      1,
     },
-    "weights/mobilenetv2_gaze.onnx": {
+    "weights/gaze_ft_mobileone.onnx": {
         "input_size":    (448, 448),
-        "pitch_up_sign": -1,
+        "pitch_up_sign": +1,
+        "yaw_sign":      1,
+    },
+    "weights/gaze_mobileone.onnx": {
+        "input_size":    (224, 224),
+        "pitch_up_sign": +1,
         "yaw_sign":      1,
     },
 }

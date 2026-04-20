@@ -19,7 +19,7 @@ from collections import defaultdict
 DATASET_DIR = "my_captures"
 MODEL_PATH  = "weights/mobileone_s0_gaze.onnx"
 OUTPUT_JSON = "angle_targets.json"
-LABELS      = ["left", "right", "up", "down", "center"]
+LABELS      = ["left", "right", "center"]
 INPUT_SIZE  = (448, 448)
 
 # ─── Load model ──────────────────────────────────────────────────────────────
@@ -106,7 +106,7 @@ for label in LABELS:
     yaw_std    = float(np.std(r["yaws"]))
     pitch_mean = float(np.mean(r["pitches"]))
     pitch_std  = float(np.std(r["pitches"]))
-
+ 
     print(f"{label:<8}  {r['n']:>5}  {yaw_mean:>+10.2f}  {yaw_std:>8.2f}"
           f"  {pitch_mean:>+11.2f}  {pitch_std:>9.2f}"
           + (f"  (skipped {r['skipped']})" if r["skipped"] else ""))
