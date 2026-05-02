@@ -15,7 +15,8 @@ import collections
 import threading
 import serial
 from flask import Flask, Response
-
+import time
+from collections import deque
 # ================================================================
 # UART
 # ================================================================
@@ -240,23 +241,81 @@ class GazeWorker:
 # ================================================================
 # UART CONTROL
 # ================================================================
-_last_cmd = None
+# _last_cmd = None
 
+class CommandController:
+    def __init__(self,
+                 yaw_left=-20, yaw_right=20,
+                 pitch_stop=-10,
+                 confirm_frames=5,      # số frame liên tiếp cùng lệnh mới gửi
+                 cooldown_sec=0.4):     # thời gian tối thiểu giữa 2 lệnh
+        self.yaw_left    = yaw_left
+        self.yaw_right   = yaw_right
+        self.pitch_stop  = pitch_stop
+        self.confirm_frames = confirm_frames
+        self.cooldown_sec   = cooldown_sec
+
+        self._cmd_history  = deque(maxlen=confirm_frames)
+        self._last_cmd     = None
+        self._last_sent_t  = 0.0
+
+    def _classify(self, yaw, pitch, detected):
+        if not detected:
+            return b"Stop#"
+        if pitch < self.pitch_stop:       # nhìn xuống quá → dừng
+            return b"Stop#"
+        if yaw > self.yaw_right:          # yaw dương → nhìn phải
+            return b"Right#"
+        if yaw < self.yaw_left:           # yaw âm → nhìn trái
+            return b"Left#"
+        return b"Forward#"
+
+    def update(self, yaw, pitch, detected):
+        """
+        Gọi mỗi frame. Trả về lệnh nếu được gửi, None nếu không.
+        """
+        cmd = self._classify(yaw, pitch, detected)
+        self._cmd_history.append(cmd)
+
+        # Chỉ xử lý khi đủ confirm_frames
+        if len(self._cmd_history) < self.confirm_frames:
+            return None
+
+        # Tất cả frame trong window phải đồng thuận
+        if len(set(self._cmd_history)) != 1:
+            return None
+
+        # Không gửi lại lệnh giống lệnh cũ
+        if cmd == self._last_cmd:
+            return None
+
+        # Cooldown — tránh gửi quá nhanh
+        now = time.time()
+        if now - self._last_sent_t < self.cooldown_sec:
+            return None
+
+        # Gửi lệnh
+        self._last_cmd    = cmd
+        self._last_sent_t = now
+        return cmd
+
+
+controller = CommandController(
+    yaw_left=-20,
+    yaw_right=20,
+    pitch_stop=-20,
+    confirm_frames=5,     # ~5 frame liên tiếp ≈ 0.33s ở 15fps
+    cooldown_sec=0.4
+)
+_current_cmd = "---"
 def send_control_signal(yaw, pitch, detected):
-    global _last_cmd
-    if not uart:
-        return
-    if not detected:
-        cmd = b"Stop#"
-    elif yaw > 20:
-        cmd = b"Right#"
-    elif yaw < -20:
-        cmd = b"Left#"
-    else:
-        cmd = b"Forward#"
-    if cmd != _last_cmd:
-        uart.write(cmd)
-        _last_cmd = cmd
+    global _current_cmd
+    cmd = controller.update(yaw, pitch, detected)
+    if cmd is not None:
+        _current_cmd = cmd.decode().replace("#", "")
+        print(f"[CMD] {_current_cmd}")
+        if uart:
+            uart.write(cmd)
 
 # ================================================================
 # DRAW
@@ -264,24 +323,60 @@ def send_control_signal(yaw, pitch, detected):
 def draw(frame, box, pitch, yaw, infer_t, fps):
     if box:
         x1, y1, x2, y2 = box
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        dx = -np.tan(np.radians(yaw))
-        dy = -np.tan(np.radians(pitch))
-        norm = np.hypot(dx, dy)
-        if norm > 0:
-            dx /= norm
-            dy /= norm
-        end = (int(cx + dx * 100), int(cy + dy * 100))
-        cv2.arrowedLine(frame, (cx, cy), end, (0, 0, 255), 3)
+    # ===== GAZE BALL (góc kế) =====
+    r      = 50   # bán kính vòng tròn
+    cx, cy = 580, 430  # vị trí trên frame (góc dưới phải)
+    max_angle = 30.0   # góc tối đa map về mép vòng tròn
 
-    cv2.putText(frame, f"Yaw:   {yaw:+.1f}",          (10, 30),  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-    cv2.putText(frame, f"Pitch: {pitch:+.1f}",         (10, 58),  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-    cv2.putText(frame, f"Infer: {infer_t*1000:.0f}ms", (10, 86),  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0),  2)
-    cv2.putText(frame, f"FPS:   {fps:.1f}",            (10, 114), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+    # Vẽ vòng tròn nền
+    cv2.circle(frame, (cx, cy), r, (80, 80, 80), -1)   # nền xám
+    cv2.circle(frame, (cx, cy), r, (200, 200, 200), 2) # viền
+    # Crosshair
+    cv2.line(frame, (cx - r, cy), (cx + r, cy), (60, 60, 60), 1)
+    cv2.line(frame, (cx, cy - r), (cx, cy + r), (60, 60, 60), 1)
+    # Vòng dead zone
+    cv2.circle(frame, (cx, cy), int(r * 5 / max_angle), (100, 100, 100), 1)
 
+    # Map góc → tọa độ bi
+    bx = int(cx + np.clip(yaw   / max_angle, -1, 1) * r)
+    by = int(cy - np.clip(pitch / max_angle, -1, 1) * r)  # pitch+ = lên
+
+    # Màu bi theo vùng
+    dist = np.hypot(yaw, pitch)
+    if dist < 5:
+        ball_color = (0, 255, 0)      # xanh = dead zone / Forward
+    elif abs(yaw) > abs(pitch):
+        ball_color = (0, 255, 255)    # vàng = trái/phải
+    else:
+        ball_color = (0, 100, 255)    # cam = lên/xuống
+
+    cv2.circle(frame, (bx, by), 10, ball_color, -1)
+    cv2.circle(frame, (bx, by), 10, (255, 255, 255), 1)
+
+    # Text
+    cv2.putText(frame, f"Yaw:   {yaw:+.1f}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 100), 2)
+    cv2.putText(frame, f"Pitch: {pitch:+.1f}", (10, 58),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 100), 2)
+    cv2.putText(frame, f"Infer: {infer_t*1000:.0f}ms", (10, 86),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    cv2.putText(frame, f"FPS:   {fps:.1f}", (10, 114),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+    # CMD to ở giữa dưới
+    cmd_color = {
+        "Forward": (0, 255, 0),
+        "Left":    (0, 255, 255),
+        "Right":   (0, 255, 255),
+        "Stop":    (0, 0, 255),
+    }.get(_current_cmd, (255, 255, 255))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, _), _ = cv2.getTextSize(_current_cmd, font, 1.2, 3)
+    cv2.putText(frame, _current_cmd,
+                ((frame.shape[1] - tw) // 2, frame.shape[0] - 15),
+                font, 1.2, cmd_color, 3)
 # ================================================================
 # FLASK
 # ================================================================
@@ -299,7 +394,8 @@ def generate_frames():
 
         worker.update_frame(frame)
         r = worker.get_result()
-
+        # Nhin phai yaw -, trai +
+        # Nhin len la pitch +, xuong pitch -
         send_control_signal(r["yaw"], r["pitch"], r["box"] is not None)
 
         fps_times.append(time.time())
