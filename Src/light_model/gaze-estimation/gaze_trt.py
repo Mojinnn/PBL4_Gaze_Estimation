@@ -244,79 +244,150 @@ class GazeWorker:
 # _last_cmd = None
 
 class CommandController:
-    def __init__(self,
-                 yaw_left=-20, yaw_right=20,
-                 pitch_stop=-10,
-                 confirm_frames=5,      # số frame liên tiếp cùng lệnh mới gửi
-                 cooldown_sec=0.4):     # thời gian tối thiểu giữa 2 lệnh
-        self.yaw_left    = yaw_left
-        self.yaw_right   = yaw_right
-        self.pitch_stop  = pitch_stop
-        self.confirm_frames = confirm_frames
-        self.cooldown_sec   = cooldown_sec
+    """
+    Finite State Machine:
+    
+    IDLE    : xe đứng yên, chờ lệnh rõ ràng
+    RUNNING : đang thực thi lệnh
+    STOPPING: đang dừng (buffer an toàn)
+    
+    Nguyên tắc:
+    - Mặc định STOP, không bao giờ tự Forward
+    - Phải nhìn rõ ràng (vượt ngưỡng + giữ đủ lâu) mới chạy
+    - Mất mặt / nhìn xuống → dừng NGAY, không cần confirm
+    - Đổi hướng phải qua Stop trước (không rẽ trực tiếp)
+    """
 
-        self._cmd_history  = deque(maxlen=confirm_frames)
-        self._last_cmd     = None
-        self._last_sent_t  = 0.0
+    IDLE     = "IDLE"
+    RUNNING  = "RUNNING"
+    STOPPING = "STOPPING"
 
-    def _classify(self, yaw, pitch, detected):
-        if not detected:
-            return b"Stop#"
-        if pitch < self.pitch_stop:       # nhìn xuống quá → dừng
-            return b"Stop#"
-        if yaw > self.yaw_right:          # yaw dương → nhìn phải
-            return b"Right#"
-        if yaw < self.yaw_left:           # yaw âm → nhìn trái
-            return b"Left#"
-        return b"Forward#"
+    def __init__(self):
+        # Ngưỡng góc
+        self.YAW_THRESHOLD   = 20    # ± độ để rẽ
+        self.PITCH_STOP      = -20   # nhìn xuống quá → stop
+        self.DEAD_ZONE       = 15     # ± độ vùng chết = Forward
+
+        # Thời gian confirm (giây)
+        self.T_CONFIRM_MOVE  = 0.4   # giữ hướng bao lâu mới chạy
+        self.T_CONFIRM_TURN  = 0.5   # giữ rẽ bao lâu mới rẽ
+        self.T_STOP_BUFFER   = 0.2   # dừng bao lâu trước khi đổi hướng
+
+        # Tần suất gửi lệnh giữ (keep-alive)
+        self.T_KEEPALIVE     = 0.3   # gửi lại lệnh hiện tại mỗi 0.3s
+
+        self._state          = self.IDLE
+        self._intent         = None   # hướng người dùng đang nhìn
+        self._intent_since   = 0.0    # thời điểm bắt đầu giữ hướng đó
+        self._current_cmd    = b"Stop#"
+        self._last_sent_t    = 0.0
+        self._stop_since     = 0.0
+
+    def _classify_intent(self, yaw, pitch, detected):
+        """Phân loại ý định từ góc nhìn"""
+        if not detected or pitch < self.PITCH_STOP:
+            return "STOP"
+        if yaw > self.YAW_THRESHOLD:
+            return "RIGHT"
+        if yaw < -self.YAW_THRESHOLD:
+            return "LEFT"
+        if abs(yaw) <= self.DEAD_ZONE:
+            return "FORWARD"
+        return "STOP"   # vùng mơ hồ giữa dead zone và threshold → stop
 
     def update(self, yaw, pitch, detected):
-        """
-        Gọi mỗi frame. Trả về lệnh nếu được gửi, None nếu không.
-        """
-        cmd = self._classify(yaw, pitch, detected)
-        self._cmd_history.append(cmd)
+        now    = time.time()
+        intent = self._classify_intent(yaw, pitch, detected)
 
-        # Chỉ xử lý khi đủ confirm_frames
-        if len(self._cmd_history) < self.confirm_frames:
-            return None
+        # ── SAFETY FIRST: mất mặt hoặc nhìn xuống → dừng NGAY ──
+        if not detected or pitch < self.PITCH_STOP:
+            self._state       = self.STOPPING
+            self._stop_since  = now
+            self._intent      = None
+            return self._send(b"Stop#", now)
 
-        # Tất cả frame trong window phải đồng thuận
-        if len(set(self._cmd_history)) != 1:
-            return None
+        # ── Theo dõi intent có ổn định không ──
+        if intent != self._intent:
+            self._intent       = intent
+            self._intent_since = now
 
-        # Không gửi lại lệnh giống lệnh cũ
-        if cmd == self._last_cmd:
-            return None
+        held_time = now - self._intent_since
 
-        # Cooldown — tránh gửi quá nhanh
-        now = time.time()
-        if now - self._last_sent_t < self.cooldown_sec:
-            return None
+        # ══ FSM ══
+        if self._state == self.IDLE or self._state == self.STOPPING:
+            # Đang dừng — chờ đủ buffer rồi mới nhận lệnh mới
+            stop_ok = (now - self._stop_since) >= self.T_STOP_BUFFER
 
-        # Gửi lệnh
-        self._last_cmd    = cmd
-        self._last_sent_t = now
-        return cmd
+            if intent == "STOP" or not stop_ok:
+                return self._send(b"Stop#", now)
+
+            # Đủ thời gian dừng → sẵn sàng nhận lệnh
+            t_confirm = self.T_CONFIRM_TURN if intent in ("LEFT", "RIGHT") \
+                        else self.T_CONFIRM_MOVE
+
+            if held_time >= t_confirm:
+                self._state = self.RUNNING
+                # fall through xuống RUNNING
+
+        if self._state == self.RUNNING:
+            if intent == "STOP":
+                self._state      = self.STOPPING
+                self._stop_since = now
+                return self._send(b"Stop#", now)
+
+            # Đổi hướng phải qua Stop (không rẽ trực tiếp)
+            if self._current_cmd != b"Stop#":
+                cmd_intent = {
+                    "FORWARD": b"Forward#",
+                    "LEFT":    b"Left#",
+                    "RIGHT":   b"Right#",
+                }.get(intent)
+                if cmd_intent != self._current_cmd:
+                    # Hướng khác → dừng trước
+                    self._state      = self.STOPPING
+                    self._stop_once  = now
+                    return self._send(b"Stop#", now)
+
+            cmd = {
+                "FORWARD": b"Forward#",
+                "LEFT":    b"Left#",
+                "RIGHT":   b"Right#",
+            }.get(intent, b"Stop#")
+
+            return self._send(cmd, now)
+
+        return None
+
+    def _send(self, cmd, now):
+        """Gửi nếu lệnh thay đổi HOẶC keep-alive hết hạn"""
+        changed   = cmd != self._current_cmd
+        keepalive = (now - self._last_sent_t) >= self.T_KEEPALIVE
+
+        if changed or keepalive:
+            self._current_cmd  = cmd
+            self._last_sent_t  = now
+            return cmd
+        return None
+
+    @property
+    def state(self):
+        return self._state
+
+    @property
+    def current_cmd(self):
+        return self._current_cmd.decode().replace("#", "")
 
 
-controller = CommandController(
-    yaw_left=-20,
-    yaw_right=20,
-    pitch_stop=-20,
-    confirm_frames=5,     # ~5 frame liên tiếp ≈ 0.33s ở 15fps
-    cooldown_sec=0.4
-)
-_current_cmd = "---"
+controller = CommandController()
+
 def send_control_signal(yaw, pitch, detected):
     global _current_cmd
     cmd = controller.update(yaw, pitch, detected)
     if cmd is not None:
-        _current_cmd = cmd.decode().replace("#", "")
-        print(f"[CMD] {_current_cmd}")
+        _current_cmd = controller.current_cmd
+        print(f"[{controller.state}] → {_current_cmd}")
         if uart:
             uart.write(cmd)
-
 # ================================================================
 # DRAW
 # ================================================================
