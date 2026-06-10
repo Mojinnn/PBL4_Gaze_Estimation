@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 Gaze Estimation - Wheelchair Control
-Python 3.6 | TensorRT 8.2 GPU | SSD Face Detect | Flask Stream | Fast UART
+Python 3.6 | TensorRT 8.2 GPU | SSD Face Detect | Fast UART | No Stream
 
-Bản này giữ nguyên kiểu crop mặt của code cũ để không làm lệch yaw/pitch,
-nhưng tối ưu SSD bằng cache box và tách UART ra thread riêng 50 Hz.
+Bản không stream để giảm tải CPU.
+Giữ nguyên kiểu crop mặt của code cũ để không làm lệch yaw/pitch,
+tối ưu SSD bằng cache box và tách UART ra thread riêng 50 Hz.
 
 Run:
-    python3.6 gaze_trt_olddetect_uartfast.py
+    python3.6 gaze_trt_olddetect_uartfast_nostream.py
 """
 
 import cv2
@@ -19,7 +20,6 @@ cuda.init()  # init thủ công, không dùng autoinit
 import collections
 import threading
 import serial
-from flask import Flask, Response
 
 # ================================================================
 # CONFIG
@@ -43,13 +43,9 @@ UART_HZ   = 50
 UART_KEEPALIVE_SEC = 1.5   # chỉ nhắc lại lệnh mỗi 1.5s nếu không đổi trạng thái
 USE_SHORT_CMD = False  # False: Forward#/Left#/Right#/Stop# | True: F/L/R/S
 
-# Flask stream
-JPEG_QUALITY = 60
-
 # ================================================================
 # GLOBAL STATE
 # ================================================================
-fps_times = collections.deque(maxlen=30)
 _current_cmd = "Stop"
 
 # ================================================================
@@ -574,178 +570,86 @@ class UARTControlThread:
     def stop(self):
         self.running = False
 
-# ================================================================
-# DRAW
-# ================================================================
-def draw(frame, box, pitch, yaw, infer_t, det_t, fps):
-    if box:
-        x1, y1, x2, y2 = box
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-    r      = 50
-    cx, cy = 580, 430
-    max_angle = 30.0
-
-    cv2.circle(frame, (cx, cy), r, (80, 80, 80), -1)
-    cv2.circle(frame, (cx, cy), r, (200, 200, 200), 2)
-    cv2.line(frame, (cx - r, cy), (cx + r, cy), (60, 60, 60), 1)
-    cv2.line(frame, (cx, cy - r), (cx, cy + r), (60, 60, 60), 1)
-    cv2.circle(frame, (cx, cy), int(r * 5 / max_angle), (100, 100, 100), 1)
-
-    bx = int(cx + np.clip(yaw   / max_angle, -1, 1) * r)
-    by = int(cy - np.clip(pitch / max_angle, -1, 1) * r)
-
-    dist = np.hypot(yaw, pitch)
-    if dist < 5:
-        ball_color = (0, 255, 0)
-    elif abs(yaw) > abs(pitch):
-        ball_color = (0, 255, 255)
-    else:
-        ball_color = (0, 100, 255)
-
-    cv2.circle(frame, (bx, by), 10, ball_color, -1)
-    cv2.circle(frame, (bx, by), 10, (255, 255, 255), 1)
-
-    cv2.putText(frame, "Yaw:   {:+.1f}".format(yaw), (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 100), 2)
-    cv2.putText(frame, "Pitch: {:+.1f}".format(pitch), (10, 58),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 100), 2)
-    cv2.putText(frame, "Infer: {:.0f}ms".format(infer_t * 1000), (10, 86),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    cv2.putText(frame, "SSD:   {:.0f}ms/{}f".format(det_t * 1000, DETECT_EVERY), (10, 114),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-    cv2.putText(frame, "FPS:   {:.1f}".format(fps), (10, 142),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-    cv2.putText(frame, "UART:  {}Hz @{}".format(UART_HZ, UART_BAUD), (10, 170),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-    cmd_color = {
-        "Forward": (0, 255, 0),
-        "Left":    (0, 255, 255),
-        "Right":   (0, 255, 255),
-        "Stop":    (0, 0, 255),
-    }.get(_current_cmd, (255, 255, 255))
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    (tw, _), _ = cv2.getTextSize(_current_cmd, font, 1.2, 3)
-    cv2.putText(frame, _current_cmd,
-                ((frame.shape[1] - tw) // 2, frame.shape[0] - 15),
-                font, 1.2, cmd_color, 3)
 
 # ================================================================
-# INIT
+# STATUS LOGGER - NO STREAM
 # ================================================================
-app = Flask(__name__)
+class StatusLoggerThread:
+    def __init__(self, worker, interval=1.0):
+        self.worker = worker
+        self.interval = float(interval)
+        self.running = True
+        self.last_frame_id = -1
+        self.last_t = time.time()
+        self.thread = threading.Thread(target=self._run)
+        self.thread.daemon = True
+        self.thread.start()
+        print("[STATUS] Started | interval {}s".format(self.interval))
 
-model    = TRTModel(ENGINE_PATH)
-detector = FaceDetector()
-cam      = CameraBuffer(CAPTURE_W, CAPTURE_H, CAPTURE_FPS)
-cam_thr  = CameraThread(cam)
-worker   = GazeWorker(cam_thr, detector, model)
-controller = CommandController()
-uart_thr = UARTControlThread(worker, controller, hz=UART_HZ)
+    def _run(self):
+        while self.running:
+            time.sleep(self.interval)
+            r = self.worker.get_result()
+            now = time.time()
+            fid = r.get("frame_id", -1)
+            dt = now - self.last_t
+            fps = 0.0
+            if dt > 0 and self.last_frame_id >= 0:
+                fps = float(fid - self.last_frame_id) / dt
+            self.last_frame_id = fid
+            self.last_t = now
+            age = now - r.get("updated_t", 0.0) if r.get("updated_t", 0.0) else -1.0
+            print("[STATUS] face={} yaw={:+.1f} pitch={:+.1f} cmd={} infer={:.0f}ms ssd={:.0f}ms fps~{:.1f} age={:.2f}s".format(
+                r.get("box") is not None,
+                r.get("yaw", 0.0),
+                r.get("pitch", 0.0),
+                _current_cmd,
+                r.get("infer_t", 0.0) * 1000.0,
+                r.get("det_t", 0.0) * 1000.0,
+                fps,
+                age
+            ))
 
-# ================================================================
-# FLASK
-# ================================================================
-def _jpeg_frame(frame):
-    ok, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-    if not ok:
-        return None
-    return buffer.tobytes()
-
-
-def generate_frames(overlay=True):
-    while cam.is_alive():
-        frame, fid = cam_thr.get_frame(copy=True)
-        if frame is None:
-            time.sleep(0.01)
-            continue
-
-        r = worker.get_result()
-
-        fps_times.append(time.time())
-        fps = (len(fps_times) - 1) / (fps_times[-1] - fps_times[0]) if len(fps_times) >= 2 else 0.0
-
-        if overlay:
-            draw(frame, r["box"], r["pitch"], r["yaw"], r["infer_t"], r.get("det_t", 0.0), fps)
-
-        jpg = _jpeg_frame(frame)
-        if jpg is None:
-            continue
-
-        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpg + b'\r\n')
-
-
-@app.route('/')
-def index():
-    return """
-    <h2>Gaze Tracking - old detect crop + fast UART</h2>
-    <p><a href='/status'>Status</a> | <a href='/raw'>Raw camera</a> | <a href='/video_feed'>Overlay stream</a></p>
-    <img src='/video_feed'>
-    """
-
-
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(overlay=True),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-
-
-@app.route('/raw')
-def raw():
-    return Response(generate_frames(overlay=False),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-
-
-@app.route('/status')
-def status():
-    frame, fid = cam_thr.get_frame(copy=False)
-    r = worker.get_result()
-    age = time.time() - r.get("updated_t", 0.0) if r.get("updated_t", 0.0) else -1
-    return """
-    <pre>
-Camera opened : {cam_open}
-Have frame    : {have_frame}
-Frame id      : {fid}
-Detected      : {detected}
-Yaw           : {yaw:+.2f}
-Pitch         : {pitch:+.2f}
-Infer ms      : {infer_ms:.1f}
-SSD last ms   : {det_ms:.1f}
-Result age s  : {age:.3f}
-Current cmd   : {cmd}
-UART          : {port} @ {baud}, check {hz} Hz, keepalive {ka}s
-DETECT_EVERY  : {de}
-USE_SHORT_CMD : {short}
-    </pre>
-    """.format(
-        cam_open=cam.is_alive(),
-        have_frame=(frame is not None),
-        fid=fid,
-        detected=(r["box"] is not None),
-        yaw=r["yaw"],
-        pitch=r["pitch"],
-        infer_ms=r["infer_t"] * 1000.0,
-        det_ms=r.get("det_t", 0.0) * 1000.0,
-        age=age,
-        cmd=_current_cmd,
-        port=UART_PORT,
-        baud=UART_BAUD,
-        hz=UART_HZ,
-        ka=UART_KEEPALIVE_SEC,
-        de=DETECT_EVERY,
-        short=USE_SHORT_CMD
-    )
+    def stop(self):
+        self.running = False
 
 # ================================================================
-# MAIN
+# INIT / MAIN - NO FLASK STREAM
 # ================================================================
-if __name__ == "__main__":
-    print("Open: http://<JETSON_IP>:5000")
+def main():
+    model = TRTModel(ENGINE_PATH)
+    detector = FaceDetector()
+    cam = CameraBuffer(CAPTURE_W, CAPTURE_H, CAPTURE_FPS)
+    cam_thr = CameraThread(cam)
+    worker = GazeWorker(cam_thr, detector, model)
+    controller = CommandController()
+    uart_thr = UARTControlThread(worker, controller, hz=UART_HZ)
+    status_thr = StatusLoggerThread(worker, interval=1.0)
+
+    print("[MAIN] No-stream mode started")
+    print("[MAIN] UART: {} @ {}, check {} Hz, keepalive {}s".format(
+        UART_PORT, UART_BAUD, UART_HZ, UART_KEEPALIVE_SEC
+    ))
+    print("[MAIN] Press Ctrl+C to stop")
+
     try:
-        app.run(host='0.0.0.0', port=5000, threaded=True)
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        print("\n[MAIN] Stopping...")
     finally:
+        status_thr.stop()
         uart_thr.stop()
         worker.stop()
         cam_thr.stop()
         cam.release()
+        if uart:
+            try:
+                uart.write(controller._cmd_bytes("STOP"))
+                uart.close()
+            except Exception:
+                pass
+        print("[MAIN] Stopped")
+
+if __name__ == "__main__":
+    main()
